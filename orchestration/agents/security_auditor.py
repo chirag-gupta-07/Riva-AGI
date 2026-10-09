@@ -7,7 +7,7 @@ from orchestration.orchestrator.llm import call_gemini
 
 logger = logging.getLogger(__name__)
 
-@registry.register("security_auditor", AgentCapabilities(description="Audits code for vulnerabilities.", tools=["audit"], agent_level="TASK_DOER"))
+@registry.register("security_auditor", AgentCapabilities(description="Inspects workspace code for vulnerabilities.", tools=["read_file", "list_directory"], agent_level="TASK_DOER"))
 def security_auditor_agent(task_data: InputData) -> AgentResponse:
     logger.info("Routing to Security Auditor Agent")
     start_time = time.time()
@@ -17,11 +17,11 @@ def security_auditor_agent(task_data: InputData) -> AgentResponse:
     sys_prompt = f"You are the security_auditor agent. Your job is to fulfill the user's request expertly."
     
     # Call the GenAI LLM
-    content = call_gemini(
+    content, tool_calls = call_gemini(
         prompt=task_data.text_content, 
         api_key=my_key, 
         system_instruction=sys_prompt, 
-        agent_id="security_auditor"
+        agent_id="security_auditor", tools=["read_file", "list_directory"], return_tool_calls=True
     )
     execution_time = (time.time() - start_time) * 1000
     
@@ -29,7 +29,7 @@ def security_auditor_agent(task_data: InputData) -> AgentResponse:
         agent_id="security_auditor",
         status=ResponseStatus.SUCCESS,
         content=content,
-        tool_calls=[],
+        tool_calls=tool_calls,
         execution_time_ms=execution_time,
         metadata={"processed_modality": task_data.input_type.value}
     )

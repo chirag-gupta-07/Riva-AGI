@@ -57,6 +57,7 @@ class ToolCall(BaseModel):
         ...,
         description="Expected data format returned by the tool (e.g., 'str', 'dict', 'image_url', 'json')."
     )
+    result: Optional["ToolResult"] = None
 
 
 # ============================================================================
@@ -107,3 +108,6 @@ class ToolResult(BaseModel):
         default=None,
         description="How long the tool took to execute, in milliseconds."
     )
+
+
+ToolCall.model_rebuild()

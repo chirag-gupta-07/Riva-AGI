@@ -41,6 +41,8 @@ def classify_intent(task: str) -> dict:
         }
 
     task_lower = task.lower()
+    if task_lower.rstrip('.!?') in {'hello', 'hi', 'hey', 'good morning', 'good evening', 'good afternoon'}:
+        return {'intent': 'conversation', 'agent': 'reasoner', 'confidence': 1.0}
     config = load_routing_config()
 
     best_intent = "unknown"

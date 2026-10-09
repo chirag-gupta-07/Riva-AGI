@@ -4,10 +4,11 @@ from orchestration.orchestrator.registry import registry, AgentCapabilities
 from orchestration import InputData, AgentResponse, ResponseStatus
 from orchestration.orchestrator.config import key_manager
 from orchestration.orchestrator.llm import call_gemini
+from orchestration.orchestrator.schemas.planning import ReviewDecision
 
 logger = logging.getLogger(__name__)
 
-@registry.register("reviewer", AgentCapabilities(description="Reviews generated content and code.", tools=["review"], agent_level="MANAGER"))
+@registry.register("reviewer", AgentCapabilities(description="Reviews generated content and code.", tools=[], agent_level="MANAGER"))
 def reviewer_agent(task_data: InputData) -> AgentResponse:
     logger.info("Routing to Reviewer Agent")
     start_time = time.time()
@@ -28,7 +29,7 @@ You MUST output ONLY a valid JSON object with the following schema:
         prompt=task_data.text_content, 
         api_key=my_key, 
         system_instruction=sys_prompt, 
-        agent_id="reviewer"
+        agent_id="reviewer", response_schema=ReviewDecision
     )
     execution_time = (time.time() - start_time) * 1000
     

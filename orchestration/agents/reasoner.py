@@ -7,7 +7,7 @@ from orchestration.orchestrator.llm import call_gemini
 
 logger = logging.getLogger(__name__)
 
-@registry.register("reasoner", AgentCapabilities(description="Provides logical reasoning.", tools=["reason"], agent_level="TASK_DOER"))
+@registry.register("reasoner", AgentCapabilities(description="Provides logical reasoning and conversation.", tools=[], agent_level="TASK_DOER"))
 def reasoner_agent(task_data: InputData) -> AgentResponse:
     logger.info("Routing to Reasoner Agent")
     start_time = time.time()

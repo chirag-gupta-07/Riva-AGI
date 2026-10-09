@@ -139,13 +139,13 @@ Navigate to **[http://localhost:8000](http://localhost:8000)** in your browser a
 All system parameters are configurable via `.env` or system environment variables.
 
 ### A. Gemini API & Model Selection
-Configure the Gemini Live model identifier via `GEMINI_MODEL`:
+Configure the Gemini Live model identifier via `GEMINI_LIVE_MODEL` (legacy `GEMINI_MODEL` is also accepted):
 ```env
 # Ultra-Low-Latency Live Streaming (recommended for fastest speech turnaround, ~300-500ms)
-GEMINI_MODEL=gemini-3.1-flash-live-preview
+GEMINI_LIVE_MODEL=gemini-3.1-flash-live-preview
 
 # Higher Token Quota Model (larger context headroom)
-# GEMINI_MODEL=gemini-2.5-flash-native-audio-latest
+# GEMINI_LIVE_MODEL=gemini-2.5-flash-native-audio-latest
 ```
 
 | Model Identifier | Latency | Token Quota | Best For |

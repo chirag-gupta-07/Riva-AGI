@@ -4,10 +4,11 @@ from orchestration.orchestrator.registry import registry, AgentCapabilities
 from orchestration import InputData, AgentResponse, ResponseStatus
 from orchestration.orchestrator.config import key_manager
 from orchestration.orchestrator.llm import call_gemini
+from orchestration.orchestrator.schemas.planning import IntentDecision
 
 logger = logging.getLogger(__name__)
 
-@registry.register("intent_classifier", AgentCapabilities(description="Classifies the user's intent.", tools=["classify"], agent_level="MANAGER"))
+@registry.register("intent_classifier", AgentCapabilities(description="Classifies the user's intent.", tools=[], agent_level="MANAGER"))
 def intent_classifier_agent(task_data: InputData) -> AgentResponse:
     logger.info("Routing to Intent Classifier Agent")
     start_time = time.time()
@@ -27,12 +28,12 @@ You MUST output ONLY a valid JSON object with the following schema:
   "confidence": 0.9
 }"""
     
-    # Call the GenAI LLM
+    sys_prompt += "\nUse browser for website navigation, forms, browser interaction, uploads and downloads. Use reasoner for greetings and conversation."
     content = call_gemini(
         prompt=task_data.text_content, 
         api_key=my_key, 
         system_instruction=sys_prompt, 
-        agent_id="intent_classifier"
+        agent_id="intent_classifier", response_schema=IntentDecision
     )
     execution_time = (time.time() - start_time) * 1000
     

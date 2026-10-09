@@ -1,9 +1,18 @@
 import inspect
 import logging
+import time
+import uuid
+from pydantic import validate_call
+from orchestration.tools.policy import current_policy, check_budget
 from typing import Callable, Any, Dict, List, Optional
 from dataclasses import dataclass, field
 
 logger = logging.getLogger(__name__)
+
+
+class ToolFailure(str):
+    """Backwards-compatible text error, distinguishable from legitimate file/page text."""
+    pass
 
 @dataclass
 class ToolDefinition:
@@ -12,6 +21,7 @@ class ToolDefinition:
     description: str
     category: str = 'general'
     parameters_schema: Dict[str, Any] = field(default_factory=dict)
+    validated_func: Optional[Callable] = None
 
 class ToolRegistry:
     def __init__(self):
@@ -24,6 +34,8 @@ class ToolRegistry:
         """
         def decorator(f: Callable):
             tool_name = name or f.__name__
+            if tool_name in self._tools:
+                raise ValueError(f'Tool {tool_name} is already registered.')
             tool_desc = description or inspect.getdoc(f) or 'No description provided.'
             
             sig = inspect.signature(f)
@@ -42,6 +54,7 @@ class ToolRegistry:
                 category=category,
                 parameters_schema=params
             )
+            tool_def.validated_func = validate_call(config={"strict": True})(f)
             self._tools[tool_name] = tool_def
             logger.debug(f'Registered tool: {tool_name} [{category}]')
             return f
@@ -78,8 +91,31 @@ class ToolRegistry:
         tool_func = self.get_tool(tool_name)
         if not tool_func:
             raise ValueError(f'Tool {tool_name} not registered.')
-        logger.info(f'Executing tool [{tool_name}] with args: {kwargs}')
-        return tool_func(**kwargs)
+        check_budget()
+        policy = current_policy()
+        if policy.allowed_tools is not None and tool_name not in policy.allowed_tools:
+            raise PermissionError(f'Tool {tool_name} is not permitted for this agent.')
+        if len(policy.calls) >= policy.max_calls:
+            raise RuntimeError('Tool call budget exhausted.')
+        policy.calls.append(tool_name)
+        logger.info('Executing tool [%s]', tool_name)
+        return self._tools[tool_name].validated_func(**kwargs)
+
+    def execute_result(self, tool_name: str, **kwargs):
+        """Produce a correlated result for successful and failed invocations."""
+        from orchestration.orchestrator.schemas.tool import ToolResult
+        started = time.monotonic()
+        result = ToolResult(call_id=uuid.uuid4().hex, tool_name=tool_name, success=False)
+        try:
+            result.output = self.execute(tool_name, **kwargs)
+            if isinstance(result.output, ToolFailure):
+                result.error = str(result.output)
+            else:
+                result.success = True
+        except Exception as exc:
+            result.error = str(exc)
+        result.execution_time_ms = (time.monotonic() - started) * 1000
+        return result
 
 # Global Tool Registry instance
 tool_registry = ToolRegistry()

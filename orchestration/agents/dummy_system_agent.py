@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
     name="dummy_system",
     capabilities=AgentCapabilities(
         description="Handles system-level operations like reading files or checking memory.",
-        tools=["list_files", "check_memory"],
+        tools=[],
         agent_level="TASK_DOER"
     )
 )
@@ -85,7 +85,7 @@ def dummy_orchestrator_router(task_request: InputData) -> AgentResponse:
     
     return AgentResponse(
         agent_id="router",
-        status=ResponseStatus.FAILED,
+        status=ResponseStatus.FAILURE,
         content="[Router] Error: No suitable agent registered for this task.",
         tool_calls=[],
         execution_time_ms=0.0

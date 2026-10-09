@@ -1,4 +1,7 @@
 # Riva-AGI
+Local chat, browser setup, test commands, and current limitations are documented in
+[the orchestration guide](orchestration/README.md).
+
 ## Just write your name here as contributor with the format - Name - Domain
 
 - **Tooba Ashfaque** - System Software

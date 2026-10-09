@@ -50,6 +50,12 @@ class TaskStateManager:
         with self._lock:
             if task_id in self._tasks:
                 raise ValueError(f"Task '{task_id}' already exists.")
+            if len(self._tasks) >= 1000:
+                oldest_finished = next((key for key, value in self._tasks.items()
+                                        if value.status in {TaskStatus.COMPLETED, TaskStatus.FAILED}), None)
+                if oldest_finished is None:
+                    raise RuntimeError('Too many active tasks; finish existing tasks first.')
+                del self._tasks[oldest_finished]
             self._tasks[task_id] = TaskState(
                 task_id=task_id,
                 current_step=1,
@@ -91,7 +97,9 @@ class TaskStateManager:
 
     def get_task_status(self, task_id: str) -> Optional[TaskState]:
         """Query function: 'what's the status of task #X'"""
-        return self._tasks.get(task_id)
+        with self._lock:
+            state = self._tasks.get(task_id)
+            return state.model_copy(deep=True) if state else None
 
 
 if __name__ == "__main__":

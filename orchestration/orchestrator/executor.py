@@ -7,7 +7,7 @@ from orchestration.orchestrator.llm import call_gemini
 
 logger = logging.getLogger(__name__)
 
-@registry.register("executor", AgentCapabilities(description="Executes cross-agent tasks.", tools=["execute"], agent_level="MANAGER"))
+@registry.register("executor", AgentCapabilities(description="Legacy executor; graph scheduling is deterministic.", tools=[], agent_level="MANAGER"))
 def executor_agent(task_data: InputData) -> AgentResponse:
     logger.info("Routing to Executor Agent")
     start_time = time.time()

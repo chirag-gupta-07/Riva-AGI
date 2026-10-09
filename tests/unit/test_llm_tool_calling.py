@@ -8,6 +8,17 @@ from orchestration.agents.coder import coder_agent
 from orchestration.agents.researcher import researcher_agent
 
 
+def test_all_tools_convert_to_real_sdk_declarations():
+    from google import genai
+    from google.genai import types
+    # Constructing a client/declaration performs no API request.
+    with genai.Client(api_key='offline-schema-test') as client:
+        for name, definition in tool_registry.get_all_tools().items():
+            wrapped = _wrap_tool_for_execution(name, definition.func, [])
+            declaration = types.FunctionDeclaration.from_callable(client=client, callable=wrapped)
+            assert declaration.name == name
+
+
 def test_tool_wrapper_tracking():
     executed_log = []
     
@@ -47,6 +58,7 @@ def test_call_gemini_with_tools(mock_client_cls):
     mock_chat = MagicMock()
     mock_response = MagicMock()
     mock_response.text = "File successfully created."
+    mock_response.function_calls = None
     mock_chat.send_message.return_value = mock_response
     mock_client.chats.create.return_value = mock_chat
     mock_client_cls.return_value = mock_client

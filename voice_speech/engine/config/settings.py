@@ -25,7 +25,7 @@ class VADConfig:
 class GeminiLiveConfig:
     """Gemini Live API Configuration."""
     api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
-    model: str = field(default_factory=lambda: os.getenv("GEMINI_MODEL", "gemini-3.1-flash-live-preview"))
+    model: str = field(default_factory=lambda: os.getenv("GEMINI_LIVE_MODEL", "").strip() or os.getenv("GEMINI_MODEL", "gemini-3.1-flash-live-preview"))
     voice_name: str = os.getenv("GEMINI_VOICE", "Aoede")  # Options: Aoede, Charon, Fenrir, Kore, Puck
     thinking_level: str = os.getenv("THINKING_LEVEL", "MINIMAL")  # MINIMAL or LOW
     response_modalities: List[str] = field(default_factory=lambda: ["AUDIO"])

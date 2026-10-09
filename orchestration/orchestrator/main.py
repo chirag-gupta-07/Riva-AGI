@@ -1,29 +1,21 @@
-import os
-import sys
-
-# Ensure the root directory is in the Python path so absolute imports work
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-
-import logging
+"""Sequential, bounded task orchestration with explicit step handoffs."""
 import json
+import uuid
 from typing import TypedDict
-
 from dotenv import load_dotenv
 from langgraph.graph import StateGraph, START, END
 
+load_dotenv()
+
+from orchestration import InputData, InputType, AgentResponse, ResponseStatus
 from orchestration.orchestrator.registry import registry
 from orchestration.orchestrator.state_manager import TaskStateManager, TaskStatus
-from orchestration.orchestrator.config import key_manager
 from orchestration.orchestrator.router import classify_intent
-from orchestration import InputData, AgentResponse, ResponseStatus, InputType
-
-# Level 2 Managers
+from orchestration.orchestrator.schemas.planning import IntentDecision, ExecutionPlan, ReviewDecision
+from orchestration.tools.policy import execution_scope, check_budget
 import orchestration.orchestrator.intent_classifier
 import orchestration.orchestrator.planner
-import orchestration.orchestrator.executor
 import orchestration.orchestrator.reviewer
-
-# Level 3 Task-Doers
 import orchestration.agents.coder
 import orchestration.agents.researcher
 import orchestration.agents.writer
@@ -34,319 +26,199 @@ import orchestration.agents.data_analyst
 import orchestration.agents.devops
 import orchestration.agents.security_auditor
 import orchestration.agents.seo_specialist
-import orchestration.agents.dummy_system_agent
+import orchestration.agents.browser
 
-load_dotenv()
-
-logger = logging.getLogger(__name__)
-
-# Single global State Manager
 task_manager = TaskStateManager()
+MAX_PLAN_STEPS = 8
+MAX_REPAIRS = 1
+
 
 class AgentState(TypedDict):
-    # Now we store the schema-validated objects!
     task_payload: InputData
     agent: str
     response_payload: AgentResponse | None
     task_id: str
     session_id: str
     source: str
-    
-    # Hierarchical State Variables
-    complexity: str # "simple" or "complex"
-    routing_decision: str # target agent or action ("delegate", "review")
-    plan: list[dict] # [{"agent": "coder", "task": "..."}]
-    current_step: int # index of the current plan step
-    completed_steps: list[dict] # [{"agent": "...", "result": "..."}]
-    feedback: str # feedback from reviewer
-    
+    complexity: str
+    routing_decision: str
+    plan: list[dict]
+    current_step: int
+    completed_steps: list[dict]
+    feedback: str
     intent: str
     confidence: float
+    review_attempts: int
+    error: str
 
 
-def clean_json(text: str) -> str:
-    """Helper to clean markdown json blocks."""
-    if text.startswith("```json"):
-        text = text[7:]
-    if text.endswith("```"):
-        text = text[:-3]
+def initial_state(task_text, task_id=None, session_id='session-001', source='cli'):
+    return dict(task_payload=InputData(input_type=InputType.TEXT, text_content=task_text,
+                                      metadata={'source': source, 'session_id': session_id}),
+                agent='fallback', response_payload=None, task_id=task_id or uuid.uuid4().hex,
+                session_id=session_id, source=source, complexity='simple', routing_decision='fallback',
+                plan=[], current_step=0, completed_steps=[], feedback='', intent='unknown',
+                confidence=0.0, review_attempts=0, error='')
+
+
+def workers():
+    return {name for name, cap in registry.get_all_capabilities().items() if cap.agent_level == 'TASK_DOER'}
+
+
+def clean_json(text):
+    text = (text or '').strip()
+    if text.startswith('```'):
+        text = text.split('\n', 1)[1].rsplit('```', 1)[0]
     return text.strip()
 
-def intent_node(state: AgentState):
-    task_id = state["task_id"]
-    task_text = state["task_payload"].text_content or ""
-    task_manager.start_task(task_id=task_id, initial_data={"task": task_text})
-    task_manager.update_task_state(task_id, "intent_classifier", TaskStatus.IN_PROGRESS)
-    
+
+def invoke_agent(name, payload, state):
+    check_budget()
+    handler = registry.get_agent(name)
+    if handler is None:
+        raise ValueError(f'Unknown agent: {name}')
+    with execution_scope(session_id=state['session_id']):
+        response = handler(payload)
+    if response.status != ResponseStatus.SUCCESS:
+        error = RuntimeError(response.error_message or response.content or 'Agent failed')
+        error.response = response
+        raise error
+    return response
+
+
+def failure(state, message, response=None):
+    task_manager.update_task_state(state['task_id'], 'orchestrator', TaskStatus.FAILED)
+    return {'error': message, 'routing_decision': 'failed', 'response_payload': response or
+            AgentResponse(agent_id='orchestrator', status=ResponseStatus.FAILURE,
+                          content=message, error_message=message)}
+
+
+def intent_node(state):
+    task_manager.start_task(state['task_id'], {'task': state['task_payload'].text_content})
     try:
-        handler = registry.get_agent("intent_classifier")
-        response = handler(state["task_payload"])
-        data = json.loads(clean_json(response.content))
-        complexity = data.get("complexity", "simple")
-        routing_decision = data.get("target_agent", "fallback")
-        intent = data.get("intent", "unknown")
-        confidence = data.get("confidence", 0.0)
-        if routing_decision not in registry.get_all_capabilities() and routing_decision not in ["planner", "fallback"]:
-            routing_decision = "fallback"
+        response = invoke_agent('intent_classifier', state['task_payload'], state)
+        decision = IntentDecision.model_validate_json(clean_json(response.content))
+        target = 'planner' if decision.complexity == 'complex' else decision.target_agent
+        if target not in workers() | {'planner', 'fallback'}:
+            target = 'fallback'
+        return dict(complexity='complex' if target == 'planner' else 'simple',
+                    routing_decision=target, agent=target, intent=decision.intent, confidence=decision.confidence)
     except Exception:
-        # Fall back to the rule-based router if JSON fails
-        classification = classify_intent(task_text)
-        complexity = "simple"
-        routing_decision = classification["agent"]
-        intent = classification["intent"]
-        confidence = classification["confidence"]
-        
-    task_manager.update_task_state(task_id, "intent_classifier", TaskStatus.COMPLETED)
-    
-    return {
-        "complexity": complexity, 
-        "routing_decision": routing_decision,
-        "agent": routing_decision,
-        "intent": intent,
-        "confidence": confidence
-    }
+        choice = classify_intent(state['task_payload'].text_content or '')
+        target = choice['agent']
+        return dict(complexity='complex' if target == 'planner' else 'simple',
+                    routing_decision=target, agent=target, intent=choice['intent'], confidence=choice['confidence'])
 
-def planner_node(state: AgentState):
-    task_id = state["task_id"]
-    task_manager.update_task_state(task_id, "planner", TaskStatus.IN_PROGRESS)
-    
-    handler = registry.get_agent("planner")
-    response = handler(state["task_payload"])
-    
+
+def planner_node(state):
     try:
-        plan = json.loads(clean_json(response.content))
-    except Exception:
-        plan = []
-        
-    task_manager.update_task_state(task_id, "planner", TaskStatus.COMPLETED)
-    return {"plan": plan, "current_step": 0, "completed_steps": []}
+        response = invoke_agent('planner', state['task_payload'], state)
+        plan = ExecutionPlan.model_validate_json(clean_json(response.content)).model_dump()
+        if not 1 <= len(plan) <= MAX_PLAN_STEPS or any(s['agent'] not in workers() for s in plan):
+            raise ValueError('Plan must contain 1–8 steps assigned to registered workers.')
+        return dict(plan=plan, current_step=0, completed_steps=[])
+    except Exception as exc:
+        return failure(state, f'Planning failed: {exc}', getattr(exc, 'response', None))
 
-def executor_node(state: AgentState):
-    task_id = state["task_id"]
-    task_manager.update_task_state(task_id, "executor", TaskStatus.IN_PROGRESS)
-    
-    # Let executor see the plan and what's done
-    executor_prompt = f"Plan: {json.dumps(state['plan'])}\nCompleted: {json.dumps(state['completed_steps'])}"
-    from orchestration import InputData, InputType
-    temp_payload = InputData(input_type=InputType.TEXT, text_content=executor_prompt)
-    
-    handler = registry.get_agent("executor")
-    response = handler(temp_payload)
-    
+
+def executor_node(state):
+    if state.get('error'):
+        return {'routing_decision': 'failed'}
+    index = state['current_step']
+    target = state['plan'][index]['agent'] if index < len(state['plan']) else 'reviewer'
+    return {'routing_decision': target, 'agent': target}
+
+
+def create_agent_node(agent_name):
+    def run(state):
+        task_manager.update_task_state(state['task_id'], agent_name, TaskStatus.PROCESSING)
+        payload = state['task_payload']
+        if state['complexity'] == 'complex':
+            step = state['plan'][state['current_step']]
+            context = {'original_goal': payload.text_content, 'assigned_step': step['task'],
+                       'previous_results': state['completed_steps'], 'review_feedback': state['feedback']}
+            payload = payload.model_copy(update={'text_content': json.dumps(context, ensure_ascii=False)})
+        try:
+            response = invoke_agent(agent_name, payload, state)
+            completed = state['completed_steps'] + [{'agent': agent_name, 'result': response.content,
+                'tool_calls': [call.model_dump() for call in response.tool_calls]}]
+            task_manager.update_task_state(state['task_id'], agent_name,
+                TaskStatus.PROCESSING if state['complexity'] == 'complex' else TaskStatus.COMPLETED)
+            return dict(response_payload=response, completed_steps=completed, current_step=state['current_step'] + 1)
+        except Exception as exc:
+            return failure(state, f'{agent_name} failed: {exc}', getattr(exc, 'response', None))
+    return run
+
+
+def reviewer_node(state):
+    payload = state['task_payload'].model_copy(update={'text_content': json.dumps({
+        'original_goal': state['task_payload'].text_content, 'outputs': state['completed_steps']})})
     try:
-        data = json.loads(clean_json(response.content))
-        action = data.get("action", "delegate")
-        target = data.get("target", "fallback")
-        if action == "review":
-            target = "reviewer"
-        elif target not in registry.get_all_capabilities() and target != "fallback":
-            target = "fallback"
-    except Exception:
-        action = "review"
-        target = "reviewer"
-        
-    task_manager.update_task_state(task_id, "executor", TaskStatus.COMPLETED)
-    return {"routing_decision": target, "agent": target}
+        response = invoke_agent('reviewer', payload, state)
+        review = ReviewDecision.model_validate_json(clean_json(response.content))
+        if review.status == 'approved':
+            task_manager.update_task_state(state['task_id'], 'orchestrator', TaskStatus.COMPLETED)
+            # Keep the worker deliverable, not the review JSON.
+            return {'routing_decision': 'approved', 'feedback': review.feedback}
+        if state.get('review_attempts', 0) >= MAX_REPAIRS:
+            return failure(state, f'Review rejected after repair: {review.feedback}')
+        # Never replay external actions to repair prose. Send all evidence to a reasoning worker.
+        repair = {'agent': 'reasoner', 'task': 'Repair the final answer using existing evidence. '
+                  'Do not claim an unperformed action succeeded. Explain unresolved limitations. ' + review.feedback}
+        return dict(plan=state['plan'] + [repair], feedback=review.feedback,
+                    review_attempts=state.get('review_attempts', 0) + 1, routing_decision='rejected')
+    except Exception as exc:
+        return failure(state, f'Review failed: {exc}', getattr(exc, 'response', None))
 
-def reviewer_node(state: AgentState):
-    task_id = state["task_id"]
-    task_manager.update_task_state(task_id, "reviewer", TaskStatus.IN_PROGRESS)
-    
-    review_prompt = f"Original: {state['task_payload'].text_content}\nOutput: {json.dumps(state['completed_steps'])}"
-    from orchestration import InputData, InputType
-    temp_payload = InputData(input_type=InputType.TEXT, text_content=review_prompt)
-    
-    handler = registry.get_agent("reviewer")
-    response = handler(temp_payload)
-    
-    try:
-        data = json.loads(clean_json(response.content))
-        status = data.get("status", "approved")
-        feedback = data.get("feedback", "")
-    except Exception:
-        status = "approved"
-        feedback = ""
-        
-    task_manager.update_task_state(task_id, "reviewer", TaskStatus.COMPLETED)
-    return {"routing_decision": status, "feedback": feedback, "response_payload": response}
 
-def create_agent_node(agent_name: str):
-    def node_func(state: AgentState):
-        task_id = state["task_id"]
-        task_manager.update_task_state(task_id, agent_name, TaskStatus.IN_PROGRESS)
-        
-        handler = registry.get_agent(agent_name)
-        response = handler(state["task_payload"])
-        
-        # Append to completed steps if in a complex loop
-        completed = list(state.get("completed_steps", []))
-        completed.append({"agent": agent_name, "result": response.content})
-        
-        task_manager.update_task_state(task_id, agent_name, TaskStatus.COMPLETED)
-        return {"response_payload": response, "completed_steps": completed}
-    return node_func
+def fallback_node(state):
+    return failure(state, 'Fallback agent reached: no suitable worker could be selected.')
 
-def fallback_node(state: AgentState):
-    task_id = state["task_id"]
-    task_manager.update_task_state(task_id, "fallback", TaskStatus.FAILED)
-    
-    # Return a dummy response_payload so downstream consumers (like CLI) don't crash
-    from orchestration import AgentResponse, ResponseStatus
-    dummy_response = AgentResponse(
-        agent_id="fallback",
-        status=ResponseStatus.FAILURE,
-        content="Fallback agent reached due to invalid routing or missing capabilities.",
-        tool_calls=[],
-        error_message="Fallback reached."
-    )
-    return {"routing_decision": "approved", "response_payload": dummy_response}
 
-def route_after_intent(state: AgentState) -> str:
-    if state["complexity"] == "complex":
-        return "planner"
-    return state["routing_decision"]
+def route_after_intent(state):
+    return 'planner' if state['complexity'] == 'complex' else state['routing_decision']
 
-def route_after_executor(state: AgentState) -> str:
-    if state["routing_decision"] == "reviewer":
-        return "reviewer"
-    return state["routing_decision"]
-    
-def route_after_worker(state: AgentState) -> str:
-    if state["complexity"] == "complex":
-        return "executor"
-    return END
-    
-def route_after_reviewer(state: AgentState) -> str:
-    if state["routing_decision"] == "rejected":
-        return "executor"
-    return END
+
+def route_after_executor(state):
+    return END if state.get('error') else state['routing_decision']
+
+
+def route_after_worker(state):
+    return 'executor' if not state.get('error') and state['complexity'] == 'complex' else END
+
+
+def route_after_reviewer(state):
+    return 'executor' if state['routing_decision'] == 'rejected' else END
+
 
 def create_orchestrator():
+    from orchestration.tools import tool_registry
+    for name, cap in registry.get_all_capabilities().items():
+        missing = set(cap.tools) - tool_registry.get_all_tools().keys()
+        if missing:
+            raise ValueError(f'{name} declares unknown tools: {sorted(missing)}')
     graph = StateGraph(AgentState)
-
-    graph.add_node("intent", intent_node)
-    graph.add_node("planner", planner_node)
-    graph.add_node("executor", executor_node)
-    graph.add_node("reviewer", reviewer_node)
-    graph.add_node("fallback", fallback_node)
-    
-    # Add Worker Agents
-    registered_agents = registry.get_all_capabilities().keys()
-    workers = [a for a in registered_agents if a not in ["intent_classifier", "planner", "executor", "reviewer"]]
-    for agent_name in workers:
-        graph.add_node(agent_name, create_agent_node(agent_name))
-        
-    graph.add_edge(START, "intent")
-
-    # Intent routing
-    intent_map = {w: w for w in workers}
-    intent_map["planner"] = "planner"
-    intent_map["fallback"] = "fallback"
-    graph.add_conditional_edges("intent", route_after_intent, intent_map)
-    
-    # Planner -> Executor
-    graph.add_edge("planner", "executor")
-    
-    # Executor routing
-    exec_map = {w: w for w in workers}
-    exec_map["reviewer"] = "reviewer"
-    exec_map["fallback"] = "fallback"
-    graph.add_conditional_edges("executor", route_after_executor, exec_map)
-    
-    # Worker routing (back to executor if complex, else END)
-    for agent_name in workers:
-        graph.add_conditional_edges(agent_name, route_after_worker, {"executor": "executor", END: END})
-        
-    # Reviewer routing
-    graph.add_conditional_edges("reviewer", route_after_reviewer, {"executor": "executor", END: END})
-    graph.add_edge("fallback", END)
-
+    for name, fn in [('intent', intent_node), ('planner', planner_node), ('executor', executor_node),
+                     ('reviewer', reviewer_node), ('fallback', fallback_node)]:
+        graph.add_node(name, fn)
+    for name in workers():
+        graph.add_node(name, create_agent_node(name))
+    graph.add_edge(START, 'intent')
+    graph.add_conditional_edges('intent', route_after_intent, {n: n for n in workers() | {'planner', 'fallback'}})
+    graph.add_edge('planner', 'executor')
+    graph.add_conditional_edges('executor', route_after_executor, {n: n for n in workers() | {'reviewer', END}})
+    for name in workers():
+        graph.add_conditional_edges(name, route_after_worker, {'executor': 'executor', END: END})
+    graph.add_conditional_edges('reviewer', route_after_reviewer, {'executor': 'executor', END: END})
+    graph.add_edge('fallback', END)
     return graph.compile()
 
 
-def run_orchestrator(
-    task_text: str,
-    task_id: str = None,
-    session_id: str = "session-001",
-    source: str = "cli",
-) -> dict:
-
-    try:
-        import uuid
-        if task_id is None:
-            task_id = f"task-{uuid.uuid4().hex[:8]}"
-
-        # Orchestrator dynamically loads its API key here
-        orchestrator_key = key_manager.get_api_key_for_role("ORCHESTRATOR")
-        if orchestrator_key:
-            logger.info("[Orchestrator] Initialized with Gemini API key from env (GEMINI_API_KEY_ORCHESTRATOR)")
-        else:
-            logger.warning("[Orchestrator] GEMINI_API_KEY_ORCHESTRATOR is not set; running without LLM access")
-
-        app = create_orchestrator()
-        
-        # Package the raw string into our strict Schema
-        input_data = InputData(
-            input_type=InputType.TEXT,
-            text_content=task_text,
-            metadata={"source": source}
-        )
-
-        result = app.invoke(
-            {
-                "task_payload": input_data,
-                "agent": "fallback",
-                "response_payload": None,
-                "task_id": task_id,
-                "session_id": session_id,
-                "source": source,
-                "complexity": "simple",
-                "routing_decision": "fallback",
-                "plan": [],
-                "current_step": 0,
-                "completed_steps": [],
-                "feedback": "",
-                "intent": "unknown",
-                "confidence": 0.0,
-            }
-        )
-
-        return result
-
-    except Exception:
-        logger.exception(
-            "Orchestration failed for task_id=%s",
-            task_id,
-        )
-        raise
+def run_orchestrator(task_text, task_id=None, session_id='session-001', source='cli'):
+    state = initial_state(task_text, task_id, session_id, source)
+    with execution_scope(session_id=session_id):
+        return create_orchestrator().invoke(state, config={'recursion_limit': 40})
 
 
-if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-    )
-    
-    print("="*60)
-    print("  Riva-AGI: FULL INTEGRATION RUN (O1, O2, O3, O4)")
-    print("="*60)
-    
-    # Allow dynamic testing from terminal or fallback to a dummy task
-    task = input("\nEnter your task (or press Enter for a dummy test): ").strip()
-    if not task:
-        task = "I need to write code for a new feature."
-    
-    print(f"\nUser Request: {task}\n")
-    
-    result = run_orchestrator(task)
-
-    print("\n" + "="*60)
-    print("  FINAL AGENT RESPONSE (O2 SCHEMA)")
-    print("="*60)
-    print(result["response_payload"].model_dump_json(indent=2))
-    
-    print("\n" + "="*60)
-    print("  FINAL TASK HISTORY (O3 TRACKER)")
-    print("="*60)
-    final_history = task_manager.get_task_status(result["task_id"])
-    print(final_history.model_dump_json(indent=2))
+if __name__ == '__main__':
+    print(run_orchestrator(input('Task: '))['response_payload'].model_dump_json(indent=2))

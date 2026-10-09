@@ -7,7 +7,7 @@ from orchestration.orchestrator.llm import call_gemini
 
 logger = logging.getLogger(__name__)
 
-@registry.register("seo_specialist", AgentCapabilities(description="Optimizes content for search engines.", tools=["optimize_seo"], agent_level="TASK_DOER"))
+@registry.register("seo_specialist", AgentCapabilities(description="Suggests search-engine improvements to supplied content.", tools=[], agent_level="TASK_DOER"))
 def seo_specialist_agent(task_data: InputData) -> AgentResponse:
     logger.info("Routing to SEO Specialist Agent")
     start_time = time.time()

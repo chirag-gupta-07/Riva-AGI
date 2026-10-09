@@ -3,6 +3,7 @@
 Allows agents to securely register themselves with their capabilities and tools.
 """
 import logging
+import functools
 from typing import Callable, Dict, Any, Optional, List, Literal
 from pydantic import BaseModel, Field
 
@@ -34,12 +35,23 @@ class AgentRegistry:
         if not isinstance(capabilities, AgentCapabilities):
             capabilities = AgentCapabilities.model_validate(capabilities)
         def decorator(func: Callable):
+            @functools.wraps(func)
+            def guarded(*args, **kwargs):
+                from orchestration import AgentResponse, ResponseStatus
+                from orchestration.tools.policy import execution_scope
+                try:
+                    with execution_scope(allowed_tools=frozenset(capabilities.tools)):
+                        return func(*args, **kwargs)
+                except Exception as exc:
+                    return AgentResponse(agent_id=name, status=ResponseStatus.FAILURE,
+                                         content=f'{name} failed: {exc}', error_message=str(exc),
+                                         tool_calls=getattr(exc, 'tool_calls', []))
             self._agents[name] = {
-                "handler": func,
+                "handler": guarded,
                 "capabilities": capabilities
             }
             logger.info(f"Agent '{name}' successfully registered with capabilities: {capabilities.model_dump_json()}")
-            return func
+            return guarded
         return decorator
 
     def get_agent(self, name: str) -> Optional[Callable]:

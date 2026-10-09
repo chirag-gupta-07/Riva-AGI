@@ -71,7 +71,7 @@ def test_edit_file(tmp_path):
     assert "Error: target_content not found" in err_res
     
     # Multiple occurrences warning
-    write_file(test_file, "foo bar foo")
+    write_file(test_file, "foo bar foo", overwrite=True)
     warn_res = edit_file(test_file, "foo", "baz")
     assert "Warning: target_content occurs 2 times" in warn_res
 

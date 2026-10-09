@@ -1,177 +1,161 @@
-import logging
+"""Bounded Gemini calls with validated, audited tool execution."""
 import functools
+import inspect
+import os
 import time
 import uuid
-from typing import Optional, List, Callable, Any, Tuple, Union
+from typing import Optional, List, Callable, Tuple, Union
 
 try:
     from google import genai
     from google.genai import types
     from google.genai.errors import APIError
 except ImportError:
-    genai = None
-    types = None
+    genai = types = None
     APIError = Exception
 
 from orchestration.tools import tool_registry
+from orchestration.tools.policy import check_budget, current_policy
 from orchestration.orchestrator.schemas.tool import ToolCall, ToolResult
 from orchestration.orchestrator.config import key_manager
 
-logger = logging.getLogger(__name__)
+PRIMARY_MODEL = 'gemini-3.5-flash-lite'
+FALLBACK_MODELS = [m.strip() for m in os.getenv('GEMINI_FALLBACK_MODELS', '').split(',') if m.strip()]
+MODEL_MAPPING = {}
 
-# High-quota, active models for free-tier resilience (1,500 RPD / 15-30 RPM)
-PRIMARY_MODEL = "gemini-3.5-flash-lite"
-FALLBACK_MODELS = ["gemini-2.5-flash-lite", "gemini-3.8-flash", "gemini-3.5-flash"]
 
-MODEL_MAPPING = {
-    # Level 2 Managers (High Reasoning & Orchestration)
-    "intent_classifier": "gemini-3.5-flash-lite",
-    "executor": "gemini-3.5-flash-lite",
-    "planner": "gemini-3.5-flash-lite",
-    "reviewer": "gemini-3.5-flash-lite",
-    
-    # Level 3 Complex Workers (Balanced)
-    "coder": "gemini-3.5-flash-lite",
-    "reasoner": "gemini-3.5-flash-lite",
-    "devops": "gemini-3.5-flash-lite",
-    "security_auditor": "gemini-3.5-flash-lite",
-    
-    # Level 3 Standard Workers (Fast Execution)
-    "writer": "gemini-3.5-flash-lite",
-    "designer": "gemini-3.5-flash-lite",
-    "qa_tester": "gemini-3.5-flash-lite",
-    "data_analyst": "gemini-3.5-flash-lite",
-    "seo_specialist": "gemini-3.5-flash-lite",
-    "researcher": "gemini-3.5-flash-lite",
-    "dummy_system": "gemini-3.5-flash-lite"
-}
+class LLMExecutionError(RuntimeError):
+    def __init__(self, message, tool_calls=None):
+        super().__init__(message)
+        self.tool_calls = tool_calls or []
+
+
+def _is_audio_model(model: str) -> bool:
+    return any(marker in model.lower() for marker in ('-live', 'native-audio', '-tts'))
+
+
+def resolve_text_model(agent_id: str = '') -> str:
+    """Resolve at call time so a shared voice setting cannot select the Live API."""
+    for setting in (f'GEMINI_MODEL_{agent_id.upper()}', 'GEMINI_TEXT_MODEL'):
+        model = os.getenv(setting, '').strip()
+        if model:
+            if _is_audio_model(model):
+                raise LLMExecutionError(
+                    f'{setting} selects an audio/Live model ({model}). '
+                    'Choose a text-generation model; use GEMINI_LIVE_MODEL for voice.')
+            return model
+    mapped = MODEL_MAPPING.get(agent_id)
+    if mapped:
+        if _is_audio_model(mapped):
+            raise LLMExecutionError(f'Text agent {agent_id} is mapped to an audio/Live model.')
+        return mapped
+    # Backwards compatibility for a shared text model. Existing voice .env files
+    # can keep GEMINI_MODEL without breaking chat.py.
+    legacy = os.getenv('GEMINI_MODEL', '').strip()
+    return legacy if legacy and not _is_audio_model(legacy) else PRIMARY_MODEL
 
 
 def _wrap_tool_for_execution(name: str, func: Callable, execution_log: list) -> Callable:
-    """
-    Wraps a tool function to track its execution time, parameters, and output
-    for audit trails, schemas, and UI telemetry.
-    """
     @functools.wraps(func)
     def tracked_tool(*args, **kwargs):
-        call_id = f"call_{uuid.uuid4().hex[:8]}"
-        start_time = time.time()
-        logger.info(f"LLM triggered tool [{name}] with args: {kwargs}")
-        
+        started = time.monotonic()
+        parameters = {}
         try:
-            result = func(*args, **kwargs)
-            duration_ms = (time.time() - start_time) * 1000.0
-            
-            tool_call = ToolCall(
-                call_id=call_id,
-                tool_name=name,
-                parameters=kwargs,
-                expected_return_type=str(type(result).__name__)
-            )
-            execution_log.append(tool_call)
-            return result
-        except Exception as e:
-            duration_ms = (time.time() - start_time) * 1000.0
-            error_msg = f"Tool Execution Error ({name}): {str(e)}"
-            logger.error(error_msg)
-            
-            tool_call = ToolCall(
-                call_id=call_id,
-                tool_name=name,
-                parameters=kwargs,
-                expected_return_type="str"
-            )
-            execution_log.append(tool_call)
-            return error_msg
-
+            bound = inspect.signature(func).bind(*args, **kwargs)
+            bound.apply_defaults()
+            parameters = dict(bound.arguments)
+            if tool_registry.get_tool(name) is func:
+                result = tool_registry.execute_result(name, **parameters)
+            else:
+                check_budget()
+                policy = current_policy()
+                if policy.allowed_tools is not None and name not in policy.allowed_tools:
+                    raise PermissionError(f'Tool {name} is not permitted.')
+                if len(policy.calls) >= policy.max_calls:
+                    raise RuntimeError('Tool call budget exhausted.')
+                policy.calls.append(name)
+                from pydantic import validate_call
+                output = validate_call(config={'strict': True})(func)(**parameters)
+                result = ToolResult(call_id=uuid.uuid4().hex, tool_name=name, success=True, output=output)
+        except Exception as exc:
+            result = ToolResult(call_id=uuid.uuid4().hex, tool_name=name, success=False,
+                                error=f'Tool Execution Error ({name}): {exc}')
+        result.execution_time_ms = (time.monotonic() - started) * 1000
+        execution_log.append(ToolCall(call_id=result.call_id, tool_name=name, parameters=parameters,
+                                     expected_return_type=type(result.output).__name__, result=result))
+        return result.output if result.success else result.error
+    tracked_tool.__name__ = name
     return tracked_tool
 
 
-def call_gemini(
-    prompt: str,
-    api_key: str,
-    system_instruction: str,
-    agent_id: str,
-    tools: Optional[List[Union[str, Callable]]] = None,
-    return_tool_calls: bool = False
-) -> Union[str, Tuple[str, List[ToolCall]]]:
-    """
-    Calls the Google GenAI SDK using the specific model assigned to the agent,
-    with full support for autonomous multi-turn tool calling, 429 quota resilience,
-    and automatic API key rotation across the 15-key pool.
-    """
+def call_gemini(prompt: str, api_key: str, system_instruction: str, agent_id: str,
+                tools: Optional[List[Union[str, Callable]]] = None,
+                return_tool_calls: bool = False, response_schema=None
+                ) -> Union[str, Tuple[str, List[ToolCall]]]:
+    if genai is None or types is None:
+        raise LLMExecutionError('Missing google-genai. Install requirements.txt first.')
+    api_key = api_key or key_manager.get_api_key_for_role(agent_id)
     if not api_key:
-        api_key = key_manager.get_api_key_for_role(agent_id)
-        if not api_key:
-            raise ValueError(f"API Key is missing for agent [{agent_id}].")
-        
-    model_name = MODEL_MAPPING.get(agent_id, PRIMARY_MODEL)
-    
-    executed_tools: List[ToolCall] = []
-    wrapped_tools: List[Callable] = []
-    
-    # Resolve tools from tool_registry or direct callables
-    if tools:
-        for t in tools:
-            if isinstance(t, str):
-                tool_func = tool_registry.get_tool(t)
-                if tool_func:
-                    wrapped_tools.append(_wrap_tool_for_execution(t, tool_func, executed_tools))
-                else:
-                    logger.warning(f"Tool '{t}' requested by agent '{agent_id}' was not found in tool_registry.")
-            elif callable(t):
-                tool_name = getattr(t, "__name__", "custom_tool")
-                wrapped_tools.append(_wrap_tool_for_execution(tool_name, t, executed_tools))
-    
-    config = types.GenerateContentConfig(
-        system_instruction=system_instruction,
-        temperature=0.7,
-        tools=wrapped_tools if wrapped_tools else None
-    )
-    
-    # Build candidate model list with high-quota Lite models first
-    candidate_models = [model_name] + [m for m in FALLBACK_MODELS if m != model_name]
-    candidate_keys = [api_key] + key_manager.get_fallback_keys(api_key)
-    
-    content = ""
+        raise LLMExecutionError(f'API key is missing for agent [{agent_id}].')
+    executed = []
+    wrapped = []
+    for item in tools or []:
+        func = tool_registry.get_tool(item) if isinstance(item, str) else item
+        if not callable(func):
+            raise LLMExecutionError(f'Unknown tool: {item}')
+        name = item if isinstance(item, str) else func.__name__
+        wrapped.append(_wrap_tool_for_execution(name, func, executed))
+    config_args = dict(system_instruction=system_instruction, temperature=0.2,
+                       tools=wrapped or None,
+                       automatic_function_calling=types.AutomaticFunctionCallingConfig(maximum_remote_calls=20))
+    if response_schema is not None:
+        config_args.update(response_mime_type='application/json', response_schema=response_schema)
+    config = types.GenerateContentConfig(**config_args)
+    primary = resolve_text_model(agent_id)
+    models = list(dict.fromkeys([primary] + [m for m in FALLBACK_MODELS if not _is_audio_model(m)]))[:3]
     last_error = None
-    success = False
-    
-    for current_key in candidate_keys:
-        client = genai.Client(api_key=current_key)
-        for current_model in candidate_models:
-            try:
-                logger.info(f"Agent [{agent_id}] invoking LLM -> {current_model} (tools: {len(wrapped_tools)})")
-                chat = client.chats.create(model=current_model, config=config)
-                response = chat.send_message(prompt)
-                content = response.text or ""
-                last_error = None
-                success = True
+    for attempt, model in enumerate(models):
+        check_budget()
+        if attempt:
+            time.sleep(min(2 ** attempt, 4))
+        client = None
+        try:
+            remaining = max(1, min(60, current_policy().deadline - time.monotonic()))
+            client = genai.Client(api_key=api_key, http_options=types.HttpOptions(
+                timeout=int(remaining * 1000), retry_options=types.HttpRetryOptions(attempts=1)))
+            chat = client.chats.create(model=model, config=config)
+            response = chat.send_message(prompt)
+            check_budget()
+            if getattr(response, 'function_calls', None):
+                raise LLMExecutionError('Tool loop stopped before completion; action budget may be exhausted.', executed)
+            content = response.text
+            if not content or not content.strip():
+                raise LLMExecutionError('Model returned no final answer.', executed)
+            failures = [c for c in executed if c.result and not c.result.success]
+            if failures:
+                raise LLMExecutionError('Task encountered tool failures; inspect the tool trace before retrying. ' +
+                                        failures[-1].result.error, executed)
+            return (content, executed) if return_tool_calls else content
+        except LLMExecutionError:
+            raise
+        except APIError as exc:
+            last_error = exc
+            if executed:
+                raise LLMExecutionError('LLM failed after tool execution. Automatic replay was blocked.', executed) from exc
+            if getattr(exc, 'code', None) not in {404, 429, 500, 502, 503, 504}:
                 break
-            except APIError as e:
-                err_str = str(e)
-                if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
-                    logger.warning(f"Agent [{agent_id}] hit 429 quota limit on {current_model}. Rotating model/key...")
-                    last_error = e
-                    continue
-                elif "404" in err_str or "NOT_FOUND" in err_str:
-                    logger.warning(f"Agent [{agent_id}] model {current_model} not found (404). Trying next model...")
-                    last_error = e
-                    continue
-                else:
-                    logger.warning(f"Agent [{agent_id}] encountered APIError on {current_model}: {e}")
-                    last_error = e
-                    continue
-            except Exception as e:
-                logger.error(f"Agent [{agent_id}] encountered unexpected error on {current_model}: {e}")
-                last_error = e
-                break
-        if success:
-            break
-            
-    if not success and last_error:
-        content = f"LLM Generation Error: {last_error}"
-        
-    if return_tool_calls:
-        return content, executed_tools
-    return content
+        except Exception as exc:
+            raise LLMExecutionError(f'LLM request failed: {type(exc).__name__}', executed) from exc
+        finally:
+            if client is not None:
+                client.close()
+    status = getattr(last_error, 'code', 'unknown')
+    hints = {
+        400: 'check model compatibility and request configuration',
+        429: 'Gemini rate/quota limit reached; wait for the limit to reset or check this project\'s quota',
+        401: 'check the configured API key',
+        403: 'check API key permissions and model access',
+        404: 'the configured model is unavailable; check GEMINI_TEXT_MODEL',
+    }
+    hint = hints.get(status, 'check model access and service availability')
+    raise LLMExecutionError(f'LLM request failed for {model} (status {status}); {hint}.', executed)

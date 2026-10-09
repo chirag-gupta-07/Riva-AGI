@@ -15,7 +15,7 @@ def qa_tester_agent(task_data: InputData) -> AgentResponse:
     logger.info("Routing to QA Tester Agent")
     start_time = time.time()
     
-    my_key = key_manager.get_api_key_for_role("WORKER_6")
+    my_key = key_manager.get_api_key_for_role("QA_TESTER")
     sys_prompt = (
         "You are the QA Tester Agent in the Riva-AGI autonomous system.\n"
         "You have access to testing tools: execute_command, read_file, write_file, and list_directory.\n"

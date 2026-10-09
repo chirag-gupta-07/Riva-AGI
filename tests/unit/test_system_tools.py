@@ -8,6 +8,13 @@ from orchestration.tools.builtin.system_tools import (
     _is_dangerous_command,
 )
 from orchestration.tools.registry import tool_registry
+from orchestration.tools.policy import execution_scope
+
+
+@pytest.fixture(autouse=True)
+def authorize_test_commands(isolated_execution):
+    with execution_scope(authorize=lambda name, args: True):
+        yield
 
 
 def test_system_tools_registered():

@@ -4,10 +4,11 @@ from orchestration.orchestrator.registry import registry, AgentCapabilities
 from orchestration import InputData, AgentResponse, ResponseStatus
 from orchestration.orchestrator.config import key_manager
 from orchestration.orchestrator.llm import call_gemini
+from orchestration.orchestrator.schemas.planning import ExecutionPlan
 
 logger = logging.getLogger(__name__)
 
-@registry.register("planner", AgentCapabilities(description="Plans and breaks down complex tasks.", tools=["plan"], agent_level="MANAGER"))
+@registry.register("planner", AgentCapabilities(description="Plans and breaks down complex tasks.", tools=[], agent_level="MANAGER"))
 def planner_agent(task_data: InputData) -> AgentResponse:
     logger.info("Routing to Planner Agent")
     start_time = time.time()
@@ -30,12 +31,12 @@ You MUST output ONLY a valid JSON array of objects with the following schema:
   }
 ]"""
     
-    # Call the GenAI LLM
+    sys_prompt += "\nAlso use the browser worker for website interaction. Produce at most 8 sequential steps. Never plan duplicate external submissions."
     content = call_gemini(
         prompt=task_data.text_content, 
         api_key=my_key, 
         system_instruction=sys_prompt, 
-        agent_id="planner"
+        agent_id="planner", response_schema=ExecutionPlan
     )
     execution_time = (time.time() - start_time) * 1000
     

@@ -7,7 +7,7 @@ from orchestration.orchestrator.llm import call_gemini
 
 logger = logging.getLogger(__name__)
 
-@registry.register("writer", AgentCapabilities(description="Writes and formats content.", tools=["write"], agent_level="TASK_DOER"))
+@registry.register("writer", AgentCapabilities(description="Writes and formats text responses.", tools=[], agent_level="TASK_DOER"))
 def writer_agent(task_data: InputData) -> AgentResponse:
     logger.info("Routing to Writer Agent")
     start_time = time.time()

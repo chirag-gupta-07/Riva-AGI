@@ -1,4 +1,18 @@
 {
+    "browser": {
+        "agent": "browser",
+        "keywords": [
+            "browser",
+            "website",
+            "webpage",
+            "fill form",
+            "click",
+            "download",
+            "upload",
+            "navigate",
+            "https://"
+        ]
+    },
     "coding": {
         "agent": "coder",
         "keywords": [

@@ -12,6 +12,7 @@ from orchestration.tools.builtin.web_tools import (
     web_search,
     fetch_url_content,
 )
+from orchestration.tools.builtin import browser_tools
 
 __all__ = [
     "read_file",

@@ -7,7 +7,7 @@ from orchestration.orchestrator.llm import call_gemini
 
 logger = logging.getLogger(__name__)
 
-@registry.register("designer", AgentCapabilities(description="Creates design and UX mockups.", tools=["design"], agent_level="TASK_DOER"))
+@registry.register("designer", AgentCapabilities(description="Provides design and UX specifications in text.", tools=[], agent_level="TASK_DOER"))
 def designer_agent(task_data: InputData) -> AgentResponse:
     logger.info("Routing to Designer Agent")
     start_time = time.time()

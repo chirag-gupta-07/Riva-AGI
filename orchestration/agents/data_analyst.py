@@ -7,7 +7,7 @@ from orchestration.orchestrator.llm import call_gemini
 
 logger = logging.getLogger(__name__)
 
-@registry.register("data_analyst", AgentCapabilities(description="Analyzes data and numbers.", tools=["analyze"], agent_level="TASK_DOER"))
+@registry.register("data_analyst", AgentCapabilities(description="Reasons about data supplied in the task.", tools=[], agent_level="TASK_DOER"))
 def data_analyst_agent(task_data: InputData) -> AgentResponse:
     logger.info("Routing to Data Analyst Agent")
     start_time = time.time()

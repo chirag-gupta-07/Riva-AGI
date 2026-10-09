@@ -4,7 +4,8 @@ import platform
 import re
 import subprocess
 from typing import List, Optional
-from orchestration.tools.registry import tool
+from orchestration.tools.registry import tool, ToolFailure
+from orchestration.tools.policy import require_authorization, current_policy
 
 logger = logging.getLogger(__name__)
 
@@ -60,11 +61,16 @@ def execute_command(command: str, timeout_seconds: int = 30) -> str:
         Formatted string containing exit code, stdout, and stderr, or an error message.
     """
     if not command or not command.strip():
-        return "Error: Command cannot be empty."
+        return ToolFailure("Error: Command cannot be empty.")
 
     if _is_dangerous_command(command):
         logger.warning(f"Blocked dangerous command from execution: {command}")
-        return f"Error: Command blocked by security blacklist: '{command}'"
+        return ToolFailure(f"Error: Command blocked by security blacklist: '{command}'")
+
+    if not 1 <= timeout_seconds <= 60:
+        return ToolFailure("Error: timeout_seconds must be between 1 and 60.")
+    # Arbitrary shell execution is privileged; the blacklist is only a secondary check.
+    require_authorization("execute_command", {"command": command, "timeout_seconds": timeout_seconds})
 
     try:
         result = subprocess.run(
@@ -73,20 +79,23 @@ def execute_command(command: str, timeout_seconds: int = 30) -> str:
             capture_output=True,
             text=True,
             timeout=timeout_seconds,
+            cwd=str(current_policy().workspace),
         )
-        stdout_str = result.stdout.strip() if result.stdout else "(empty)"
-        stderr_str = result.stderr.strip() if result.stderr else "(empty)"
-        return (
+        stdout_str = result.stdout.strip()[:12000] if result.stdout else "(empty)"
+        stderr_str = result.stderr.strip()[:4000] if result.stderr else "(empty)"
+        output = (
+            ("Error: Command failed.\n" if result.returncode else "") +
             f"Exit Code: {result.returncode}\n"
             f"Stdout:\n{stdout_str}\n"
             f"Stderr:\n{stderr_str}"
         )
+        return ToolFailure(output) if result.returncode else output
     except subprocess.TimeoutExpired:
         logger.warning(f"Command '{command}' timed out after {timeout_seconds} seconds.")
-        return f"Error: Command timed out after {timeout_seconds} seconds."
+        return ToolFailure(f"Error: Command timed out after {timeout_seconds} seconds.")
     except Exception as e:
         logger.error(f"Error executing command '{command}': {e}")
-        return f"Error executing command: {str(e)}"
+        return ToolFailure(f"Error executing command: {str(e)}")
 
 
 @tool(category="system")
@@ -107,4 +116,4 @@ def get_system_info() -> str:
         return "\n".join(info_lines)
     except Exception as e:
         logger.error(f"Error retrieving system info: {e}")
-        return f"Error retrieving system info: {str(e)}"
+        return ToolFailure(f"Error retrieving system info: {str(e)}")

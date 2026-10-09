@@ -5,7 +5,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
-from orchestration.tools.registry import tool
+from orchestration.tools.registry import tool, ToolFailure
+from orchestration.tools.network import safe_open, bounded_read
 
 logger = logging.getLogger(__name__)
 
@@ -60,7 +61,9 @@ def web_search(query: str, max_results: int = 5) -> str:
         Formatted markdown containing numbered search results with Title, URL, and Snippet.
     """
     if not query or not query.strip():
-        return "Error: Search query cannot be empty."
+        return ToolFailure("Error: Search query cannot be empty.")
+    if not 1 <= max_results <= 10:
+        return ToolFailure("Error: max_results must be between 1 and 10.")
 
     try:
         encoded_query = urllib.parse.urlencode({"q": query})
@@ -71,8 +74,8 @@ def web_search(query: str, max_results: int = 5) -> str:
             "Accept-Language": "en-US,en;q=0.5",
         }
         req = urllib.request.Request(search_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=15) as response:
-            html_content = response.read().decode("utf-8", errors="replace")
+        with safe_open(req, timeout=15) as response:
+            html_content = bounded_read(response).decode("utf-8", errors="replace")
 
         # Parse DuckDuckGo HTML results
         results: List[Dict[str, str]] = []
@@ -135,7 +138,7 @@ def web_search(query: str, max_results: int = 5) -> str:
                     results.append({"title": title, "url": url, "snippet": snippet})
 
         if not results:
-            return f"No search results found for query: '{query}'."
+            return ToolFailure(f"Error: No results could be extracted for '{query}'; the provider may have returned no matches, a challenge, or changed HTML.")
 
         formatted_items = []
         for idx, item in enumerate(results[:max_results], 1):
@@ -148,7 +151,7 @@ def web_search(query: str, max_results: int = 5) -> str:
 
     except Exception as e:
         logger.error(f"Error performing web search for '{query}': {e}")
-        return f"Error performing web search: {str(e)}"
+        return ToolFailure(f"Error performing web search: {str(e)}")
 
 
 @tool(category="web")
@@ -163,7 +166,9 @@ def fetch_url_content(url: str, max_chars: int = 4000) -> str:
         Cleaned plain text of the webpage or an error message.
     """
     if not url or not url.strip():
-        return "Error: URL cannot be empty."
+        return ToolFailure("Error: URL cannot be empty.")
+    if not 1 <= max_chars <= 20000:
+        return ToolFailure("Error: max_chars must be between 1 and 20000.")
 
     target_url = url.strip()
     if not target_url.startswith(("http://", "https://")):
@@ -172,9 +177,11 @@ def fetch_url_content(url: str, max_chars: int = 4000) -> str:
     try:
         headers = {"User-Agent": _DEFAULT_USER_AGENT}
         req = urllib.request.Request(target_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=15) as response:
+        with safe_open(req, timeout=15) as response:
             content_type = response.headers.get("Content-Type", "")
-            raw_data = response.read()
+            if content_type and not any(t in content_type.lower() for t in ('text/', 'application/json', 'application/xml', 'application/xhtml')):
+                return ToolFailure("Error: Unsupported content type; use a download tool for binary files.")
+            raw_data = bounded_read(response)
             charset = "utf-8"
             if "charset=" in content_type.lower():
                 try:
@@ -198,4 +205,4 @@ def fetch_url_content(url: str, max_chars: int = 4000) -> str:
 
     except Exception as e:
         logger.error(f"Error fetching URL content from '{target_url}': {e}")
-        return f"Error fetching URL content: {str(e)}"
+        return ToolFailure(f"Error fetching URL content: {str(e)}")

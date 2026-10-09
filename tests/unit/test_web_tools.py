@@ -93,7 +93,7 @@ def test_web_search_success_mock():
     mock_response.read.return_value = mock_html.encode("utf-8")
     mock_response.__enter__.return_value = mock_response
 
-    with patch("urllib.request.urlopen", return_value=mock_response):
+    with patch("orchestration.tools.builtin.web_tools.safe_open", return_value=mock_response):
         result = web_search("python tutorial", max_results=2)
         assert "1. **Title**: Python Programming" in result
         assert "**URL**: https://www.python.org/" in result
@@ -108,14 +108,14 @@ def test_web_search_no_results():
     mock_response.read.return_value = b"<html><body><div>No results found</div></body></html>"
     mock_response.__enter__.return_value = mock_response
 
-    with patch("urllib.request.urlopen", return_value=mock_response):
+    with patch("orchestration.tools.builtin.web_tools.safe_open", return_value=mock_response):
         result = web_search("xyznonexistentquery12345")
-        assert "No search results found for query: 'xyznonexistentquery12345'." in result
+        assert "No results could be extracted" in result
 
 
 def test_web_search_network_error():
     """Test web_search error handling when network request fails."""
-    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("Connection refused")):
+    with patch("orchestration.tools.builtin.web_tools.safe_open", side_effect=urllib.error.URLError("Connection refused")):
         result = web_search("error query")
         assert "Error performing web search: <urlopen error Connection refused>" in result
 
@@ -144,7 +144,7 @@ def test_fetch_url_content_success_mock():
     mock_response.headers.get.return_value = "text/html; charset=utf-8"
     mock_response.__enter__.return_value = mock_response
 
-    with patch("urllib.request.urlopen", return_value=mock_response):
+    with patch("orchestration.tools.builtin.web_tools.safe_open", return_value=mock_response):
         result = fetch_url_content("https://example.com/page")
         assert "Welcome to Riva-AGI" in result
         assert "Riva-AGI is an advanced agentic intelligence framework." in result
@@ -160,7 +160,7 @@ def test_fetch_url_content_truncation():
     mock_response.headers.get.return_value = "text/html"
     mock_response.__enter__.return_value = mock_response
 
-    with patch("urllib.request.urlopen", return_value=mock_response):
+    with patch("orchestration.tools.builtin.web_tools.safe_open", return_value=mock_response):
         result = fetch_url_content("https://example.com/long", max_chars=100)
         assert len(result) > 100
         assert "... [Content truncated]" in result
@@ -169,7 +169,7 @@ def test_fetch_url_content_truncation():
 
 def test_fetch_url_content_error():
     """Test fetch_url_content error handling."""
-    with patch("urllib.request.urlopen", side_effect=urllib.error.HTTPError(
+    with patch("orchestration.tools.builtin.web_tools.safe_open", side_effect=urllib.error.HTTPError(
         url="https://example.com/404", code=404, msg="Not Found", hdrs={}, fp=io.BytesIO()
     )):
         result = fetch_url_content("https://example.com/404")
